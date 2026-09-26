@@ -15,6 +15,15 @@
 //  Signals are only printed on a CLOSED bar, so nothing appears and then vanishes. Works on any symbol / timeframe.
 //  It marks a price-action pattern; it is not a validated edge on its own — test it (or wrap it in a strategy) before trading it.
 //
+//  DYNAMIC TP / SL (group 5), driven by momentum (Squeeze Momentum histogram) and relative volume:
+//   - Target at entry = base TP x (1 + step x score). Score -2..+2: momentum turning your way +1 / not -1,
+//     volume strong +1 / average 0 / below average -1.
+//   - Momentum fade: once in profit by the lock-after amount, momentum turning against moves the stop to breakeven.
+//   - Momentum flip: histogram crossing zero against the trade exits at the close.
+//   - Volume climax: a high-volume bar against the trade pulls the stop to that bar's low / high.
+//   - Runner: target reached with momentum still building -> stop locks at the target and trails by ATR.
+//   Stop changes only ever tighten. Exit labels show the result in R (multiples of the initial risk).
+//
 indicator("Aadil - Sweep + Engulf", shorttitle = "Aadil-SweepEngulf", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ═══════════════════════════════ INPUTS ═══════════════════════════════
@@ -22,6 +31,7 @@ const string G1 = "1 · Pattern"
 const string G2 = "2 · Filters"
 const string G3 = "3 · Display"
 const string G4 = "4 · Trade box (ATR stop / target)"
+const string G5 = "5 · Dynamic TP / SL (momentum + volume)"
 
 const string M_TWO  = "Two-bar (sweep bar, then engulfing bar)"
 const string M_ONE  = "One-bar (sweeps prior extreme and engulfs prior bar)"
@@ -58,6 +68,22 @@ showResult = input.bool(true, "Label the exit (TP / SL)", group = G4)
 tpCol      = input.color(#26a69a, "Take-profit box colour", group = G4)
 slCol      = input.color(#ef5350, "Stop-loss box colour", group = G4)
 
+momLen     = input.int(20, "Momentum length", minval = 2, group = G5,
+     tooltip = "Squeeze Momentum histogram length. Match your momentum indicator.")
+volLen     = input.int(20, "Volume average length", minval = 1, group = G5)
+dynTp      = input.bool(true, "Scale the target by momentum + volume", group = G5)
+tpStep     = input.float(0.25, "Target change per score point", minval = 0.0, maxval = 0.45, step = 0.05, group = G5,
+     tooltip = "Target = base x (1 + step x score). Score is -2 to +2 from momentum and volume.")
+volStrong  = input.float(1.5, "Strong volume (x avg volume)", minval = 1.0, step = 0.1, group = G5)
+useBe      = input.bool(true, "Momentum fade: move stop to breakeven", group = G5)
+lockAfterR = input.float(0.5, "Lock after (R in profit)", minval = 0.0, step = 0.1, group = G5)
+useMomExit = input.bool(true, "Momentum flip: exit at the close", group = G5)
+useClimax  = input.bool(true, "Volume climax against: tighten stop", group = G5)
+climaxMult = input.float(2.0, "Climax volume (x avg volume)", minval = 1.0, step = 0.1, group = G5)
+useRunner  = input.bool(true, "Let winners run while momentum builds", group = G5)
+trailMult  = input.float(1.0, "Runner trailing stop (x ATR)", minval = 0.1, step = 0.1, group = G5)
+showStops  = input.bool(true, "Plot the live stop / target", group = G5)
+
 // ═══════════════════════════════ LOGIC ═══════════════════════════════
 atr   = ta.atr(atrLen)
 ema   = ta.ema(close, emaLen)
@@ -68,6 +94,15 @@ bodyHi(i) => math.max(open[i], close[i])
 bodyLo(i) => math.min(open[i], close[i])
 
 engBodyOk = minBody <= 0 or math.abs(close - open) >= minBody * atr
+
+// ── Momentum (Squeeze Momentum histogram) and relative volume
+momMid     = math.avg(math.avg(ta.highest(high, momLen), ta.lowest(low, momLen)), ta.sma(close, momLen))
+mom        = ta.linreg(close - momMid, momLen, 0)
+momUp      = mom > mom[1]
+momDn      = mom < mom[1]
+momCrossUp = ta.crossover(mom, 0)
+momCrossDn = ta.crossunder(mom, 0)
+relVol     = nz(volume / ta.sma(volume, volLen), 1.0)
 
 // ── Two-bar: ref = [2], sweep = [1], engulf = [0]
 bullSweep2 = low[1] < low[2] - minSweep * atr[1] and (not needReject or close[1] > low[2])
@@ -103,22 +138,53 @@ var float slPx     = na
 var float tpPx     = na
 var box   tpBox    = na
 var box   slBox    = na
+var float initSl   = na
+var float initRisk = na
+var float bestPx   = na
+var bool  runner   = false
 
 // 1) manage the open trade first. Stop wins if stop and target are both touched in the same bar.
 exitedNow = false
 hitSl = false
 hitTp = false
+momExit = false
 if inTrade and barstate.isconfirmed and bar_index > startBar
     hitSl := dir == 1 ? low <= slPx : high >= slPx
-    hitTp := not hitSl and (dir == 1 ? high >= tpPx : low <= tpPx)
-    if hitSl or hitTp
+    touchTp = not hitSl and not runner and (dir == 1 ? high >= tpPx : low <= tpPx)
+    startRunner = touchTp and useRunner and (dir == 1 ? momUp : momDn) and relVol >= 1.0 and (close - tpPx) * dir > 0
+    hitTp := touchTp and not startRunner
+    exitPx  = hitSl ? slPx : hitTp ? tpPx : float(na)
+    exitTag = hitSl ? (runner ? "TRAIL" : (slPx == initSl ? "SL" : "STOP")) : "TP"
+    if startRunner
+        runner := true
+        slPx   := tpPx
+    if na(exitPx)
+        bestPx := dir == 1 ? math.max(bestPx, high) : math.min(bestPx, low)
+        momExit := useMomExit and (dir == 1 ? momCrossDn : momCrossUp)
+        if momExit
+            exitPx  := close
+            exitTag := "MOM"
+        else
+            if runner
+                trail = close - dir * trailMult * atr
+                slPx := dir == 1 ? math.max(slPx, trail) : math.min(slPx, trail)
+            lockOk = (bestPx - entry) * dir >= lockAfterR * initRisk and (close - entry) * dir > 0
+            if useBe and (dir == 1 ? momDn : momUp) and lockOk
+                slPx := dir == 1 ? math.max(slPx, entry) : math.min(slPx, entry)
+            if useClimax and relVol >= climaxMult and (dir == 1 ? close < open : close > open)
+                slPx := dir == 1 ? math.max(slPx, low) : math.min(slPx, high)
+    if not na(exitPx)
         box.set_right(tpBox, bar_index)
         box.set_right(slBox, bar_index)
         if showResult
-            label.new(bar_index, hitTp ? tpPx : slPx, hitTp ? "TP +" + str.tostring(tpMult / slMult, "#.##") + "R" : "SL -1R",
-                 color = hitTp ? tpCol : slCol, textcolor = color.white, size = size.tiny,
-                 style = (dir == 1) == hitTp ?label.style_label_down : label.style_label_up)
+            r   = (exitPx - entry) * dir / initRisk
+            win = r >= 0
+            txt = exitTag + " " + (win ? "+" : "") + str.tostring(r, "#.##") + "R"
+            label.new(bar_index, exitPx, txt, color = r > 0 ? tpCol : r < 0 ? slCol : color.gray,
+                 textcolor = color.white, size = size.tiny,
+                 style = (dir == 1) == win ? label.style_label_down : label.style_label_up)
         inTrade := false
+        runner := false
         exitedNow := true
     else
         box.set_right(tpBox, math.max(bar_index, startBar + boxBars))
@@ -129,14 +195,20 @@ bull = rawBull and not inTrade and not exitedNow
 bear = rawBear and not inTrade and not exitedNow and not bull
 
 if bull or bear
+    score  = dynTp ? ((bull ? momUp : momDn) ? 1 : -1) + (relVol >= volStrong ? 1 : relVol < 1.0 ? -1 : 0) : 0
+    tpUsed = tpMult * (1 + tpStep * score)
     inTrade  := true
     dir      := bull ? 1 : -1
     startBar := bar_index
     entry    := close
-    slPx     := close - dir * slMult * atr
-    tpPx     := close + dir * tpMult * atr
+    initRisk := slMult * atr
+    slPx     := close - dir * initRisk
+    initSl   := slPx
+    tpPx     := close + dir * tpUsed * atr
+    bestPx   := close
+    runner   := false
     tpBox := box.new(bar_index, math.max(entry, tpPx), bar_index + boxBars, math.min(entry, tpPx),
-         border_color = tpCol, bgcolor = color.new(tpCol, 80), text = "R:R 1:" + str.tostring(tpMult / slMult, "#.##"),
+         border_color = tpCol, bgcolor = color.new(tpCol, 80), text = "R:R 1:" + str.tostring(tpUsed / slMult, "#.##"),
          text_color = tpCol, text_size = size.small, text_halign = text.align_left)
     slBox := box.new(bar_index, math.max(entry, slPx), bar_index + boxBars, math.min(entry, slPx),
          border_color = slCol, bgcolor = color.new(slCol, 80))
@@ -148,6 +220,8 @@ if bull or bear
         line.new(bar_index - back, lvl, bar_index, lvl, color = bull ? bullCol : bearCol, style = line.style_dashed)
 
 plot(showEma ? ema : na, "Trend EMA", color = trendUp ? bullCol : trendDn ? bearCol : color.gray, linewidth = 2)
+plot(showStops and inTrade ? slPx : na, "Live stop", color = slCol, style = plot.style_linebr, linewidth = 2)
+plot(showStops and inTrade and not runner ? tpPx : na, "Live target", color = tpCol, style = plot.style_linebr, linewidth = 2)
 
 plotshape(bull and showBull, "Bullish sweep + engulf", shape.labelup, location.belowbar, bullCol,
      text = "Sweep\nEngulf", textcolor = color.white, size = size.small)
@@ -158,4 +232,6 @@ plotshape(bear and showBear, "Bearish sweep + engulf", shape.labeldown, location
 alertcondition(bull, "Bullish sweep + engulf", "{{ticker}} {{interval}}: bullish sweep + engulf (low taken, then engulfed up)")
 alertcondition(bear, "Bearish sweep + engulf", "{{ticker}} {{interval}}: bearish sweep + engulf (high taken, then engulfed down)")
 alertcondition(hitTp, "Take profit hit", "{{ticker}} {{interval}}: sweep + engulf trade hit take profit")
-alertcondition(hitSl, "Stop loss hit", "{{ticker}} {{interval}}: sweep + engulf trade hit stop loss")
+alertcondition(hitSl, "Stop hit (SL, breakeven or trail)", "{{ticker}} {{interval}}: sweep + engulf trade hit its stop")
+alertcondition(momExit, "Momentum exit", "{{ticker}} {{interval}}: sweep + engulf trade closed on momentum flip")
+alertcondition(exitedNow, "Trade closed (any exit)", "{{ticker}} {{interval}}: sweep + engulf trade closed")
