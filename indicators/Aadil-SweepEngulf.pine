@@ -24,12 +24,19 @@
 //   - Min close position: engulfing bar must close near its high/low (strong follow-through, not a weak close).
 //   - Opposing-swing distance: skips longs too close under recent swing resistance (mirrored for shorts).
 //
+//  MULTI-TIMEFRAME (5 · group, off by default): longs only when the higher-timeframe close is above its EMA, shorts
+//  only when below. Uses the last COMPLETED higher-timeframe bar, so it does not repaint.
+//
+//  ALERTS: pick "Bullish signal", "Bearish signal", "Any signal", "Take profit hit" or "Stop loss hit" in the
+//  Create Alert dialog — or "Any alert() function call" to get one message per event with entry / stop / target prices.
+//
 indicator("Aadil - Sweep + Engulf", shorttitle = "Aadil-SweepEngulf", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 // ═══════════════════════════════ INPUTS ═══════════════════════════════
 const string G1 = "1 · Pattern"
 const string G2 = "2 · Filters"
 const string G3 = "3 · Display"
 const string G4 = "4 · Trade box (ATR stop / target)"
+const string G5 = "5 · Multi-timeframe confirmation"
 const string M_TWO  = "Two-bar (sweep bar, then engulfing bar)"
 const string M_ONE  = "One-bar (sweeps prior extreme and engulfs prior bar)"
 const string M_BOTH = "Either"
@@ -74,6 +81,12 @@ boxBars    = input.int(5, "Box width when the trade opens (bars)", minval = 1, g
 showResult = input.bool(true, "Label the exit (TP / SL)", group = G4)
 tpCol      = input.color(#26a69a, "Take-profit box colour", group = G4)
 slCol      = input.color(#ef5350, "Stop-loss box colour", group = G4)
+useMtf     = input.bool(false, "Require higher-timeframe trend alignment", group = G5,
+     tooltip = "Longs only when the higher-timeframe close is above its EMA, shorts only when below. Uses the last completed higher-timeframe bar.")
+mtfTf      = input.timeframe("240", "Higher timeframe", group = G5,
+     tooltip = "Must be higher than the chart timeframe.")
+mtfEmaLen  = input.int(50, "Higher-timeframe EMA length", minval = 2, group = G5)
+showMtfEma = input.bool(false, "Plot the higher-timeframe EMA", group = G5)
 // ═══════════════════════════════ LOGIC ═══════════════════════════════
 atr   = ta.atr(atrLen)
 ema   = ta.ema(close, emaLen)
@@ -138,9 +151,16 @@ levelBull = twoBarBull ? low[2] : oneBarBull ? low[1] : na
 levelBear = twoBarBear ? high[2] : oneBarBear ? high[1] : na
 levelStartBull = twoBarBull ? bar_index - 2 : bar_index - 1
 levelStartBear = twoBarBear ? bar_index - 2 : bar_index - 1
+// ── Multi-timeframe trend confirmation ──
+if useMtf and timeframe.in_seconds(mtfTf) <= timeframe.in_seconds()
+    runtime.error("Higher timeframe (" + mtfTf + ") must be above the chart timeframe (" + timeframe.period + ").")
+// [1] + lookahead_on = last completed HTF bar: identical on history and in realtime, so no repaint.
+[mtfClose, mtfEma] = request.security(syminfo.tickerid, mtfTf, [close[1], ta.ema(close, mtfEmaLen)[1]], lookahead = barmerge.lookahead_on)
+mtfOkBull = not useMtf or mtfClose > mtfEma
+mtfOkBear = not useMtf or mtfClose < mtfEma
 // ── Final accepted signal ──
-bullOk = patternBull and engBodyOk and volOk and (not useTrend or trendUp) and adxOk and minClosePosBullOk and swingOkBull
-bearOk = patternBear and engBodyOk and volOk and (not useTrend or trendDn) and adxOk and minClosePosBearOk and swingOkBear
+bullOk = patternBull and engBodyOk and volOk and (not useTrend or trendUp) and adxOk and minClosePosBullOk and swingOkBull and mtfOkBull
+bearOk = patternBear and engBodyOk and volOk and (not useTrend or trendDn) and adxOk and minClosePosBearOk and swingOkBear and mtfOkBear
 // ═══════════════════════════════ TRADE STATE ═══════════════════════════════
 var bool  inTrade      = false
 var bool  tradeIsLong   = false
@@ -154,6 +174,8 @@ confirmedBar = barstate.isconfirmed
 canSignal  = not inTrade
 bullSignal = canSignal and showBull and bullOk and confirmedBar
 bearSignal = canSignal and showBear and bearOk and confirmedBar
+tpHit = false
+slHit = false
 if confirmedBar
     if bullSignal
         inTrade       := true
@@ -167,6 +189,7 @@ if confirmedBar
         if showLvl and not na(levelBull)
             line.new(levelStartBull, levelBull, bar_index, levelBull, color = bullCol, style = line.style_dashed)
         label.new(bar_index, low, "Bull Sweep+Engulf", style = label.style_label_up, color = bullCol, textcolor = color.white, yloc = yloc.belowbar, size = size.small)
+        alert("BULLISH Sweep+Engulf on " + syminfo.ticker + " (" + timeframe.period + ") | entry " + str.tostring(entryPrice, format.mintick) + " | stop " + str.tostring(stopPrice, format.mintick) + " | target " + str.tostring(targetPrice, format.mintick), alert.freq_once_per_bar_close)
     else if bearSignal
         inTrade       := true
         tradeIsLong    := false
@@ -179,6 +202,7 @@ if confirmedBar
         if showLvl and not na(levelBear)
             line.new(levelStartBear, levelBear, bar_index, levelBear, color = bearCol, style = line.style_dashed)
         label.new(bar_index, high, "Bear Sweep+Engulf", style = label.style_label_down, color = bearCol, textcolor = color.white, yloc = yloc.abovebar, size = size.small)
+        alert("BEARISH Sweep+Engulf on " + syminfo.ticker + " (" + timeframe.period + ") | entry " + str.tostring(entryPrice, format.mintick) + " | stop " + str.tostring(stopPrice, format.mintick) + " | target " + str.tostring(targetPrice, format.mintick), alert.freq_once_per_bar_close)
     else if inTrade
         newRight = math.max(tradeEntryBar + boxBars, bar_index + 1)
         box.set_right(tpBox, newRight)
@@ -188,10 +212,21 @@ if confirmedBar
         if hitStop
             if showResult
                 label.new(bar_index, tradeIsLong ? low : high, "SL", style = tradeIsLong ? label.style_label_down : label.style_label_up, color = slCol, textcolor = color.white, size = size.small)
+            slHit   := true
             inTrade := false
+            alert((tradeIsLong ? "LONG" : "SHORT") + " stop loss hit on " + syminfo.ticker + " (" + timeframe.period + ") at " + str.tostring(stopPrice, format.mintick), alert.freq_once_per_bar_close)
         else if hitTarget
             if showResult
                 label.new(bar_index, tradeIsLong ? high : low, "TP", style = tradeIsLong ? label.style_label_up : label.style_label_down, color = tpCol, textcolor = color.white, size = size.small)
+            tpHit   := true
             inTrade := false
+            alert((tradeIsLong ? "LONG" : "SHORT") + " take profit hit on " + syminfo.ticker + " (" + timeframe.period + ") at " + str.tostring(targetPrice, format.mintick), alert.freq_once_per_bar_close)
 // ═══════════════════════════════ PLOTS ═══════════════════════════════
 plot(showEma ? ema : na, "Trend EMA", color = trendUp ? color.new(color.green, 0) : color.new(color.red, 0), linewidth = 2)
+plot(showMtfEma ? mtfEma : na, "Higher-timeframe EMA", color = color.new(color.orange, 0), linewidth = 2, style = plot.style_stepline)
+// ═══════════════════════════════ ALERTS ═══════════════════════════════
+alertcondition(bullSignal, "Bullish signal", "Bullish Sweep+Engulf on {{ticker}} ({{interval}}) at {{close}}")
+alertcondition(bearSignal, "Bearish signal", "Bearish Sweep+Engulf on {{ticker}} ({{interval}}) at {{close}}")
+alertcondition(bullSignal or bearSignal, "Any signal", "Sweep+Engulf signal on {{ticker}} ({{interval}}) at {{close}}")
+alertcondition(tpHit, "Take profit hit", "Sweep+Engulf take profit hit on {{ticker}} ({{interval}})")
+alertcondition(slHit, "Stop loss hit", "Sweep+Engulf stop loss hit on {{ticker}} ({{interval}})")
