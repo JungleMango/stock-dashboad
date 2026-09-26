@@ -1,0 +1,161 @@
+//@version=6
+// Sweep + Engulf  —  liquidity-grab candle followed by an engulfing candle        (indicator, overlay, no repaint)
+//
+//  BULLISH: a candle takes out the previous candle's LOW (sweep), then an up candle engulfs it -> signal on the engulfing close.
+//  BEARISH: a candle takes out the previous candle's HIGH (sweep), then a down candle engulfs it.
+//
+//  Two patterns are detected (pick one or both in the settings):
+//   TWO-BAR : bar[2] = reference candle, bar[1] = sweep candle (its low < bar[2] low), bar[0] = engulfing candle.
+//   ONE-BAR : bar[1] = reference candle, bar[0] takes out bar[1] low AND closes above bar[1] high (outside-bar engulf).
+//
+//  TRADE BOX: each accepted signal opens a take-profit box and a stop-loss box (entry = close of the engulfing bar,
+//  stop / target = ATR multiples). The boxes start 5 bars wide and grow until the stop or target is touched.
+//  No new signal is shown until the open trade has closed. If stop and target are hit in the same bar, the stop wins.
+//
+//  Signals are only printed on a CLOSED bar, so nothing appears and then vanishes. Works on any symbol / timeframe.
+//  It marks a price-action pattern; it is not a validated edge on its own — test it (or wrap it in a strategy) before trading it.
+//
+indicator("Aadil - Sweep + Engulf", shorttitle = "Aadil-SweepEngulf", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ═══════════════════════════════ INPUTS ═══════════════════════════════
+const string G1 = "1 · Pattern"
+const string G2 = "2 · Filters"
+const string G3 = "3 · Display"
+const string G4 = "4 · Trade box (ATR stop / target)"
+
+const string M_TWO  = "Two-bar (sweep bar, then engulfing bar)"
+const string M_ONE  = "One-bar (sweeps prior extreme and engulfs prior bar)"
+const string M_BOTH = "Either"
+const string E_CLOSE = "Close beyond sweep bar"
+const string E_BODY  = "Body engulfs sweep bar body"
+const string E_RANGE = "Body engulfs sweep bar full range"
+
+pattern   = input.string(M_BOTH, "Pattern", options = [M_TWO, M_ONE, M_BOTH], group = G1)
+engulfRule = input.string(E_CLOSE, "Two-bar: what counts as engulfing", options = [E_CLOSE, E_BODY, E_RANGE], group = G1,
+     tooltip = "Close beyond: engulfing bar closes past the sweep bar's high (bull) / low (bear).\nBody engulfs body: engulfing body wraps the sweep bar's body.\nFull range: engulfing bar opens below the sweep bar's low and closes above its high (bull), mirrored for bear.")
+needReject = input.bool(false, "Two-bar: sweep bar must close back inside the reference bar's range", group = G1,
+     tooltip = "Stricter 'stop-run' sweep: the sweep bar pierces the level with its wick but closes back above the low (bull) / below the high (bear).")
+
+atrLen   = input.int(14, "ATR length", minval = 1, group = G2)
+minBody  = input.float(0.0, "Min engulfing body (x ATR, 0 = off)", minval = 0.0, step = 0.1, group = G2)
+minSweep = input.float(0.0, "Min sweep depth beyond the level (x ATR, 0 = off)", minval = 0.0, step = 0.05, group = G2)
+useTrend = input.bool(true, "Trend filter: longs only above the EMA, shorts only below", group = G2)
+emaLen   = input.int(50, "Trend EMA length", minval = 2, group = G2)
+showEma  = input.bool(true, "Plot the EMA (green = price above, red = price below)", group = G2)
+
+showBull = input.bool(true, "Show bullish", group = G3)
+showBear = input.bool(true, "Show bearish", group = G3)
+showLvl  = input.bool(true, "Draw the swept level", group = G3)
+bullCol  = input.color(color.new(#26a69a, 0), "Bullish colour", group = G3)
+bearCol  = input.color(color.new(#ef5350, 0), "Bearish colour", group = G3)
+
+slMult     = input.float(1.0, "Stop loss (x ATR)", minval = 0.1, step = 0.1, group = G4)
+tpMult     = input.float(2.0, "Take profit (x ATR)", minval = 0.1, step = 0.1, group = G4,
+     tooltip = "Reward:risk = take profit / stop loss. 1.0 / 2.0 = 1:2.\nEntry is the close of the engulfing bar; ATR is measured on that bar.")
+boxBars    = input.int(5, "Box width when the trade opens (bars)", minval = 1, group = G4,
+     tooltip = "The boxes start this wide, then keep growing to the right until the stop or target is hit.")
+showResult = input.bool(true, "Label the exit (TP / SL)", group = G4)
+tpCol      = input.color(#26a69a, "Take-profit box colour", group = G4)
+slCol      = input.color(#ef5350, "Stop-loss box colour", group = G4)
+
+// ═══════════════════════════════ LOGIC ═══════════════════════════════
+atr   = ta.atr(atrLen)
+ema   = ta.ema(close, emaLen)
+trendUp = close > ema
+trendDn = close < ema
+
+bodyHi(i) => math.max(open[i], close[i])
+bodyLo(i) => math.min(open[i], close[i])
+
+engBodyOk = minBody <= 0 or math.abs(close - open) >= minBody * atr
+
+// ── Two-bar: ref = [2], sweep = [1], engulf = [0]
+bullSweep2 = low[1] < low[2] - minSweep * atr[1] and (not needReject or close[1] > low[2])
+bearSweep2 = high[1] > high[2] + minSweep * atr[1] and (not needReject or close[1] < high[2])
+
+bullEng2 = close > open and (engulfRule == E_CLOSE ? close > high[1]
+     : engulfRule == E_BODY ? (close > bodyHi(1) and open < bodyLo(1))
+     : (close > high[1] and open < low[1]))
+bearEng2 = close < open and (engulfRule == E_CLOSE ? close < low[1]
+     : engulfRule == E_BODY ? (close < bodyLo(1) and open > bodyHi(1))
+     : (close < low[1] and open > high[1]))
+
+bull2 = (pattern == M_TWO or pattern == M_BOTH) and bullSweep2 and bullEng2
+bear2 = (pattern == M_TWO or pattern == M_BOTH) and bearSweep2 and bearEng2
+
+// ── One-bar: ref = [1], this bar sweeps its extreme and closes through the other side
+bull1 = (pattern == M_ONE or pattern == M_BOTH) and close > open and low < low[1] - minSweep * atr[1] and close > high[1]
+bear1 = (pattern == M_ONE or pattern == M_BOTH) and close < open and high > high[1] + minSweep * atr[1] and close < low[1]
+
+trendBullOk = not useTrend or trendUp
+trendBearOk = not useTrend or trendDn
+
+// two-bar takes priority when both fire on the same bar
+rawBull = barstate.isconfirmed and not na(atr) and showBull and engBodyOk and trendBullOk and (bull2 or bull1)
+rawBear = barstate.isconfirmed and not na(atr) and showBear and engBodyOk and trendBearOk and (bear2 or bear1)
+
+// ═══════════════════════════════ TRADE STATE (one trade at a time) ═══════════════════════════════
+var bool  inTrade  = false
+var int   dir      = 0
+var int   startBar = 0
+var float entry    = na
+var float slPx     = na
+var float tpPx     = na
+var box   tpBox    = na
+var box   slBox    = na
+
+// 1) manage the open trade first. Stop wins if stop and target are both touched in the same bar.
+exitedNow = false
+hitSl = false
+hitTp = false
+if inTrade and barstate.isconfirmed and bar_index > startBar
+    hitSl := dir == 1 ? low <= slPx : high >= slPx
+    hitTp := not hitSl and (dir == 1 ? high >= tpPx : low <= tpPx)
+    if hitSl or hitTp
+        box.set_right(tpBox, bar_index)
+        box.set_right(slBox, bar_index)
+        if showResult
+            label.new(bar_index, hitTp ? tpPx : slPx, hitTp ? "TP +" + str.tostring(tpMult / slMult, "#.##") + "R" : "SL -1R",
+                 color = hitTp ? tpCol : slCol, textcolor = color.white, size = size.tiny,
+                 style = (dir == 1) == hitTp ?label.style_label_down : label.style_label_up)
+        inTrade := false
+        exitedNow := true
+    else
+        box.set_right(tpBox, math.max(bar_index, startBar + boxBars))
+        box.set_right(slBox, math.max(bar_index, startBar + boxBars))
+
+// 2) a new signal is accepted only when flat, and not on the bar where the last trade just closed
+bull = rawBull and not inTrade and not exitedNow
+bear = rawBear and not inTrade and not exitedNow and not bull
+
+if bull or bear
+    inTrade  := true
+    dir      := bull ? 1 : -1
+    startBar := bar_index
+    entry    := close
+    slPx     := close - dir * slMult * atr
+    tpPx     := close + dir * tpMult * atr
+    tpBox := box.new(bar_index, math.max(entry, tpPx), bar_index + boxBars, math.min(entry, tpPx),
+         border_color = tpCol, bgcolor = color.new(tpCol, 80), text = "R:R 1:" + str.tostring(tpMult / slMult, "#.##"),
+         text_color = tpCol, text_size = size.small, text_halign = text.align_left)
+    slBox := box.new(bar_index, math.max(entry, slPx), bar_index + boxBars, math.min(entry, slPx),
+         border_color = slCol, bgcolor = color.new(slCol, 80))
+    if showLvl
+        bull2Wins = bull and bull2
+        bear2Wins = bear and bear2
+        lvl  = bull ? (bull2Wins ? low[2] : low[1]) : (bear2Wins ? high[2] : high[1])
+        back = (bull2Wins or bear2Wins) ? 2 : 1
+        line.new(bar_index - back, lvl, bar_index, lvl, color = bull ? bullCol : bearCol, style = line.style_dashed)
+
+plot(showEma ? ema : na, "Trend EMA", color = trendUp ? bullCol : trendDn ? bearCol : color.gray, linewidth = 2)
+
+plotshape(bull and showBull, "Bullish sweep + engulf", shape.labelup, location.belowbar, bullCol,
+     text = "Sweep\nEngulf", textcolor = color.white, size = size.small)
+plotshape(bear and showBear, "Bearish sweep + engulf", shape.labeldown, location.abovebar, bearCol,
+     text = "Sweep\nEngulf", textcolor = color.white, size = size.small)
+
+// ═══════════════════════════════ ALERTS ═══════════════════════════════
+alertcondition(bull, "Bullish sweep + engulf", "{{ticker}} {{interval}}: bullish sweep + engulf (low taken, then engulfed up)")
+alertcondition(bear, "Bearish sweep + engulf", "{{ticker}} {{interval}}: bearish sweep + engulf (high taken, then engulfed down)")
+alertcondition(hitTp, "Take profit hit", "{{ticker}} {{interval}}: sweep + engulf trade hit take profit")
+alertcondition(hitSl, "Stop loss hit", "{{ticker}} {{interval}}: sweep + engulf trade hit stop loss")
