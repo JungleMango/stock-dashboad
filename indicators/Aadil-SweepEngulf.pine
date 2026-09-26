@@ -85,21 +85,21 @@ showResult = input.bool(true, "Label the exit (TP / SL)", group = G4)
 tpCol      = input.color(#26a69a, "Take-profit box colour", group = G4)
 slCol      = input.color(#ef5350, "Stop-loss box colour", group = G4)
 momLen     = input.int(20, "Momentum length", minval = 2, group = G5,
-     tooltip = "Squeeze Momentum histogram (LazyBear): linear regression of close minus the midpoint of the Donchian channel and the SMA. Match the length of your momentum indicator.")
+     tooltip = "Squeeze Momentum histogram length. Match your momentum indicator.")
 dynTp      = input.bool(true, "Scale the target by momentum + volume at entry", group = G5)
 tpStep     = input.float(0.25, "Target change per score point", minval = 0.0, maxval = 0.45, step = 0.05, group = G5,
-     tooltip = "Score = momentum (+1 histogram turning your way, -1 not) + volume (+1 strong, 0 average, -1 below average), from -2 to +2.\nTarget = base take profit x (1 + step x score). 0.25 gives 0.5x to 1.5x.")
+     tooltip = "Target = base x (1 + step x score). Score is -2 to +2 from momentum and volume.")
 volStrong  = input.float(1.5, "Strong volume (x avg volume)", minval = 1.0, step = 0.1, group = G5)
 useBe      = input.bool(true, "Momentum fade: move stop to breakeven", group = G5,
-     tooltip = "Once the trade has been at least 'Lock after' R in profit, a histogram bar turning against it moves the stop to the entry price (only while price is still beyond entry).")
+     tooltip = "After the trade reaches the lock-after profit, momentum turning against it moves the stop to entry.")
 lockAfterR = input.float(0.5, "Lock after (R in profit)", minval = 0.0, step = 0.1, group = G5)
 useMomExit = input.bool(true, "Momentum flip: exit at the close", group = G5,
-     tooltip = "Exits at the bar close when the histogram crosses zero against the trade.")
+     tooltip = "Exit at the close when the histogram crosses zero against the trade.")
 useClimax  = input.bool(true, "Volume climax against: tighten the stop to that bar", group = G5,
-     tooltip = "A bar closing against the trade on volume >= the climax multiple pulls the stop to that bar's low (long) / high (short), if that is tighter.")
+     tooltip = "A high volume bar against the trade pulls the stop to that bar.")
 climaxMult = input.float(2.0, "Climax volume (x avg volume)", minval = 1.0, step = 0.1, group = G5)
 useRunner  = input.bool(true, "Let winners run while momentum builds", group = G5,
-     tooltip = "If a bar closes beyond the target while the histogram is still accelerating in the trade's direction on at least average volume, the stop locks at the target and trails instead of exiting.")
+     tooltip = "If momentum is still building at the target, lock the stop there and trail instead of exiting.")
 trailMult  = input.float(1.0, "Runner trailing stop (x ATR)", minval = 0.1, step = 0.1, group = G5)
 showStops  = input.bool(true, "Plot the live stop / target", group = G5)
 // ═══════════════════════════════ LOGIC ═══════════════════════════════
