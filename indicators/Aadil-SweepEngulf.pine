@@ -228,26 +228,25 @@ if confirmedBar
         momAgainst = tradeIsLong ? momDn : momUp
         hitStop    = tradeIsLong ? low <= stopPrice : high >= stopPrice
         hitTarget  = not runner and (tradeIsLong ? high >= targetPrice : low <= targetPrice)
-        float  exitPrice = na
-        string exitTag   = ""
-        // Stop is checked first, so a bar touching both stop and target counts as a stop.
+        startRunner = hitTarget and useRunner and momWithUs and relVol >= 1.0 and (close - targetPrice) * dir > 0
+        exitPrice = float(na)
+        exitTag   = ""
+        // Stop is checked first, so a bar touching both stop and target counts as a stop. Stop moves below only tighten.
         if hitStop
             exitPrice := stopPrice
-            exitTag   := runner ? "TRAIL" : stopPrice == initStop ? "SL" : "STOP"
+            exitTag   := runner ? "TRAIL" : (stopPrice == initStop ? "SL" : "STOP")
+        else if startRunner
+            runner    := true
+            stopPrice := targetPrice
         else if hitTarget
-            if useRunner and momWithUs and relVol >= 1.0 and (close - targetPrice) * dir > 0
-                runner    := true
-                stopPrice := targetPrice
-            else
-                exitPrice := targetPrice
-                exitTag   := "TP"
+            exitPrice := targetPrice
+            exitTag   := "TP"
         if na(exitPrice)
             bestPrice := tradeIsLong ? math.max(bestPrice, high) : math.min(bestPrice, low)
             if useMomExit and (tradeIsLong ? momCrossDn : momCrossUp)
                 exitPrice := close
                 exitTag   := "MOM"
             else
-                // Stop adjustments only ever tighten, and take effect from the next bar.
                 if runner
                     trail = close - dir * trailMult * atr
                     stopPrice := tradeIsLong ? math.max(stopPrice, trail) : math.min(stopPrice, trail)
